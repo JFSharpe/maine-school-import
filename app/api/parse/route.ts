@@ -1,7 +1,4 @@
-Now update app/api/parse/route.ts - this is the big one.
-Go to: https://github.com/JFSharpe/maine-school-import/blob/main/app/api/parse/route.ts
-Click the pencil icon to edit, then select all and replace with this code:
-typescriptimport { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 
 export const maxDuration = 60
