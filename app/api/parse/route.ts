@@ -5,7 +5,7 @@ export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 // Maine EPS cost categories (from ED279)
-const EPS_CATEGORIES = {
+const EPS_CATEGORIES: Record<string, string> = {
   'regularInstruction': 'Regular Instruction',
   'specialEducation': 'Special Education',
   'careerTechnical': 'Career & Technical Education',
