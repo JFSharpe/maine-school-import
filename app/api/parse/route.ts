@@ -1,10 +1,12 @@
-import { NextRequest, NextResponse } from 'next/server'
+Now update app/api/parse/route.ts - this is the big one.
+Go to: https://github.com/JFSharpe/maine-school-import/blob/main/app/api/parse/route.ts
+Click the pencil icon to edit, then select all and replace with this code:
+typescriptimport { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
-// Maine EPS cost categories (from ED279)
 const EPS_CATEGORIES: Record<string, string> = {
   'regularInstruction': 'Regular Instruction',
   'specialEducation': 'Special Education',
@@ -19,68 +21,30 @@ const EPS_CATEGORIES: Record<string, string> = {
   'allOther': 'All Other Expenditures',
 }
 
-// Maine standard function codes
 const FUNCTION_CODES: Record<string, string> = {
   '1000': 'Instruction',
-  '2110': 'Attendance/Social Work',
   '2120': 'Guidance Services',
   '2130': 'Health Services',
-  '2140': 'Psychological Services',
-  '2150': 'Speech Pathology',
-  '2160': 'Other Student Support',
-  '2170': 'Student Support - Other',
-  '2190': 'Other Support Services',
-  '2210': 'Improvement of Instruction',
-  '2213': 'Instructional Staff Training',
   '2220': 'Library/Media Services',
-  '2230': 'Technology',
   '2310': 'Board of Education',
   '2320': 'Executive Administration',
-  '2330': 'Special Programs Admin',
   '2400': 'School Administration',
-  '2500': 'Business Services',
   '2600': 'Operations & Maintenance',
-  '2610': 'Building Operations',
-  '2620': 'Building Maintenance',
-  '2660': 'Security Services',
-  '2690': 'Other O&M',
   '2700': 'Transportation',
-  '2750': 'Transportation - Other',
-  '3100': 'Food Services',
   '5100': 'Debt Service',
-  '5200': 'Fund Transfers',
 }
 
-// Function to map Trio function codes to EPS categories
 const FUNCTION_TO_EPS: Record<string, string> = {
   '1000': 'regularInstruction',
-  '2110': 'studentStaffSupport',
   '2120': 'studentStaffSupport',
   '2130': 'studentStaffSupport',
-  '2140': 'studentStaffSupport',
-  '2150': 'studentStaffSupport',
-  '2160': 'studentStaffSupport',
-  '2170': 'studentStaffSupport',
-  '2190': 'studentStaffSupport',
-  '2210': 'studentStaffSupport',
-  '2213': 'studentStaffSupport',
   '2220': 'studentStaffSupport',
-  '2230': 'studentStaffSupport',
   '2310': 'systemAdmin',
   '2320': 'systemAdmin',
-  '2330': 'systemAdmin',
   '2400': 'schoolAdmin',
-  '2500': 'systemAdmin',
   '2600': 'facilitiesMaint',
-  '2610': 'facilitiesMaint',
-  '2620': 'facilitiesMaint',
-  '2660': 'facilitiesMaint',
-  '2690': 'facilitiesMaint',
   '2700': 'transportation',
-  '2750': 'transportation',
-  '3100': 'allOther',
   '5100': 'debtService',
-  '5200': 'allOther',
 }
 
 export async function POST(request: NextRequest) {
@@ -93,41 +57,35 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'No file provided' }, { status: 400 })
     }
 
+    const fileName = file.name.toLowerCase()
     const arrayBuffer = await file.arrayBuffer()
-    const workbook = XLSX.read(arrayBuffer, { type: 'array' })
     
-    const sheetNames = workbook.SheetNames
-    console.log('Sheet names:', sheetNames)
-    console.log('Report type hint:', reportType)
-
-    // Detect and parse based on report type
     let result
-    
-    if (reportType === 'ed279' || detectED279(workbook)) {
-      result = parseED279(workbook)
-    } else if (reportType === 'trio' || detectTrioReport(workbook)) {
-      result = parseTrioReport(workbook)
-    } else if (reportType === 'staffing' || detectStaffingReport(workbook)) {
-      result = parseStaffingReport(workbook)
-    } else {
-      // Try auto-detection
-      if (sheetNames.some(s => s.toLowerCase().includes('ed279') || s.toLowerCase().includes('subsidy'))) {
-        result = parseED279(workbook)
-      } else if (sheetNames.includes('Summary') && sheetNames.includes('Detail')) {
+
+    if (fileName.endsWith('.pdf')) {
+      result = await parseED279PDF(arrayBuffer)
+    } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+      
+      if (reportType === 'trio' || detectTrioReport(workbook)) {
         result = parseTrioReport(workbook)
+      } else if (reportType === 'staffing' || detectStaffingReport(workbook)) {
+        result = parseStaffingReport(workbook)
       } else {
-        result = parseTrioReport(workbook) // Default to Trio format
+        result = parseTrioReport(workbook)
       }
+    } else {
+      return NextResponse.json({
+        success: false,
+        error: 'Unsupported file type. Please upload an Excel (.xlsx, .xls) or PDF file.',
+      })
     }
 
     if (!result.success) {
       return NextResponse.json(result)
     }
 
-    return NextResponse.json({
-      success: true,
-      data: result.data,
-    })
+    return NextResponse.json({ success: true, data: result.data })
 
   } catch (error) {
     console.error('Parse error:', error)
@@ -138,242 +96,141 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function detectED279(workbook: XLSX.WorkBook): boolean {
-  const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
-  const data = XLSX.utils.sheet_to_json<string[]>(firstSheet, { header: 1 })
-  const text = data.flat().join(' ').toLowerCase()
-  
-  return text.includes('ed279') || 
-         text.includes('essential programs and services') ||
-         text.includes('eps allocation') ||
-         text.includes('state subsidy') ||
-         text.includes('operating allocation')
+async function parseED279PDF(arrayBuffer: ArrayBuffer): Promise<{ success: boolean; data?: any; error?: string }> {
+  try {
+    const pdfParse = (await import('pdf-parse')).default
+    const buffer = Buffer.from(arrayBuffer)
+    const pdfData = await pdfParse(buffer)
+    const text = pdfData.text
+
+    let district = 'Unknown'
+    const districtMatch = text.match(/ORG ID\s*:\s*\d+\s+([A-Za-z\-\s]+(?:CSD|SAD|RSU|School Department|Schools?))/i)
+    if (districtMatch) district = districtMatch[1].trim()
+
+    let fiscalYear = 'Unknown'
+    const fyMatch = text.match(/(\d{4})\s*-\s*(\d{4})/)
+    if (fyMatch) fiscalYear = `FY${fyMatch[1].slice(-2)}-${fyMatch[2].slice(-2)}`
+
+    let generatedDate = 'Unknown'
+    const dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{4})/)
+    if (dateMatch) generatedDate = dateMatch[1]
+
+    let totalPupils = 0
+    const pupilsMatch = text.match(/Total\s+(\d+\.?\d*)\s+100\.00%/)
+    if (pupilsMatch) totalPupils = parseFloat(pupilsMatch[1]) || 0
+
+    let epsRateK8 = 0, epsRate912 = 0
+    const ratesMatch = text.match(/Calculated EPS Rates Per Pupil[:\s]*=?\s*(\d{1,2},?\d{3})\s+(\d{1,2},?\d{3})/)
+    if (ratesMatch) {
+      epsRateK8 = parseFloat(ratesMatch[1].replace(',', '')) || 0
+      epsRate912 = parseFloat(ratesMatch[2].replace(',', '')) || 0
+    }
+
+    let operatingAllocation = 0
+    const operatingMatch = text.match(/Operating Allocation Totals?\s*=?\s*\$?([\d,]+\.?\d*)/i)
+    if (operatingMatch) operatingAllocation = parseFloat(operatingMatch[1].replace(/,/g, '')) || 0
+
+    let specialEdAllocation = 0
+    const specEdMatch = text.match(/Special Education\s*-\s*EPS Allocation[\s\S]*?=?\s*\$?([\d,]+\.?\d*)/i)
+    if (specEdMatch) specialEdAllocation = parseFloat(specEdMatch[1].replace(/,/g, '')) || 0
+
+    let specialEdHighCost = 0
+    const highCostMatch = text.match(/Special Education\s*-\s*High-Cost[\s\S]*?=?\s*\$?([\d,]+\.?\d*)/i)
+    if (highCostMatch) specialEdHighCost = parseFloat(highCostMatch[1].replace(/,/g, '')) || 0
+
+    let transportationAllocation = 0
+    const transportMatch = text.match(/Transportation Operating\s*-\s*EPS Allocation[\s\S]*?=?\s*\$?([\d,]+\.?\d*)/i)
+    if (transportMatch) transportationAllocation = parseFloat(transportMatch[1].replace(/,/g, '')) || 0
+
+    let teacherRetirement = 0
+    const retirementMatch = text.match(/Teacher Retirement Amount[\s\S]*?\$?([\d,]+\.?\d*)/i)
+    if (retirementMatch) teacherRetirement = parseFloat(retirementMatch[1].replace(/,/g, '')) || 0
+
+    let giftedTalented = 0
+    const giftedMatch = text.match(/Gifted & Talented[\s\S]*?=\s*\$?([\d,]+\.?\d*)/i)
+    if (giftedMatch) giftedTalented = parseFloat(giftedMatch[1].replace(/,/g, '')) || 0
+
+    let totalAllocation = 0
+    const totalAllocMatch = text.match(/100%\s*EPS\s*Allocation\s*\$?([\d,]+\.?\d*)/i)
+    if (totalAllocMatch) totalAllocation = parseFloat(totalAllocMatch[1].replace(/,/g, '')) || 0
+
+    let debtService = 0
+    const debtMatch = text.match(/Total Debt Service Allocation\s*=\s*\$?([\d,]+\.?\d*)/i)
+    if (debtMatch) debtService = parseFloat(debtMatch[1].replace(/,/g, '')) || 0
+
+    let stateContribution = 0
+    const stateMatch = text.match(/Adjusted State Contribution\s*\$?([\d,]+\.?\d*)/i)
+    if (stateMatch) stateContribution = parseFloat(stateMatch[1].replace(/,/g, '')) || 0
+
+    let localSharePct = 0, stateSharePct = 0
+    const pctMatch = text.match(/After Adjustments\s*:\s*Local Share %\s*=\s*([\d.]+)\s*%\s*State Share %\s*=\s*([\d.]+)\s*%/i)
+    if (pctMatch) {
+      localSharePct = parseFloat(pctMatch[1]) || 0
+      stateSharePct = parseFloat(pctMatch[2]) || 0
+    }
+
+    let millExpectation = 0
+    const millMatch = text.match(/Mill\s*Expectation\s*\n?\s*([\d.]+)/i)
+    if (millMatch) millExpectation = parseFloat(millMatch[1]) || 0
+
+    const localContribution = totalAllocation - stateContribution
+
+    const summary = [
+      { category: 'Operating Allocation (Basic EPS)', epsAllocation: operatingAllocation, percentOfTotal: totalAllocation > 0 ? (operatingAllocation / totalAllocation) * 100 : 0 },
+      { category: 'Special Education - EPS', epsAllocation: specialEdAllocation, percentOfTotal: totalAllocation > 0 ? (specialEdAllocation / totalAllocation) * 100 : 0 },
+      { category: 'Special Education - High Cost', epsAllocation: specialEdHighCost, percentOfTotal: totalAllocation > 0 ? (specialEdHighCost / totalAllocation) * 100 : 0 },
+      { category: 'Transportation', epsAllocation: transportationAllocation, percentOfTotal: totalAllocation > 0 ? (transportationAllocation / totalAllocation) * 100 : 0 },
+      { category: 'Teacher Retirement', epsAllocation: teacherRetirement, percentOfTotal: totalAllocation > 0 ? (teacherRetirement / totalAllocation) * 100 : 0 },
+      { category: 'Gifted & Talented', epsAllocation: giftedTalented, percentOfTotal: totalAllocation > 0 ? (giftedTalented / totalAllocation) * 100 : 0 },
+      { category: 'Debt Service', epsAllocation: debtService, percentOfTotal: totalAllocation > 0 ? (debtService / totalAllocation) * 100 : 0 },
+    ].filter(row => row.epsAllocation > 0)
+
+    return {
+      success: true,
+      data: {
+        reportType: 'ED279 - EPS State Funding Calculation',
+        district,
+        fiscalYear,
+        generatedDate,
+        ed279: {
+          totalAllocation,
+          operatingAllocation,
+          specialEdAllocation,
+          specialEdHighCost,
+          transportationAllocation,
+          teacherRetirement,
+          giftedTalented,
+          debtService,
+          localShare: localContribution,
+          stateShare: stateContribution,
+          localSharePct,
+          stateSharePct,
+          pupilCount: totalPupils,
+          epsRateK8,
+          epsRate912,
+          millExpectation,
+          perPupilAllocation: totalPupils > 0 ? totalAllocation / totalPupils : 0,
+        },
+        summary,
+        details: [],
+        totals: { budget: totalAllocation, actual: 0, encumbered: 0, available: totalAllocation },
+      },
+    }
+  } catch (error) {
+    console.error('ED279 PDF parse error:', error)
+    return { success: false, error: 'Failed to parse ED279 PDF.' }
+  }
 }
 
 function detectTrioReport(workbook: XLSX.WorkBook): boolean {
-  const sheetNames = workbook.SheetNames
-  return sheetNames.includes('Summary') && sheetNames.includes('Detail')
+  return workbook.SheetNames.includes('Summary') && workbook.SheetNames.includes('Detail')
 }
 
 function detectStaffingReport(workbook: XLSX.WorkBook): boolean {
   const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
   const data = XLSX.utils.sheet_to_json<string[]>(firstSheet, { header: 1 })
   const text = data.flat().join(' ').toLowerCase()
-  
-  return text.includes('fte') || 
-         text.includes('staffing') ||
-         text.includes('position') ||
-         text.includes('employee')
-}
-
-function parseED279(workbook: XLSX.WorkBook) {
-  const sheet = workbook.Sheets[workbook.SheetNames[0]]
-  const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
-  
-  let district = 'Unknown'
-  let fiscalYear = 'Unknown'
-  let generatedDate = new Date().toLocaleDateString()
-  
-  // ED279 category allocations
-  const allocations: Record<string, number> = {
-    regularInstruction: 0,
-    specialEducation: 0,
-    careerTechnical: 0,
-    otherInstruction: 0,
-    studentStaffSupport: 0,
-    systemAdmin: 0,
-    schoolAdmin: 0,
-    transportation: 0,
-    facilitiesMaint: 0,
-    debtService: 0,
-    allOther: 0,
-  }
-  
-  // Additional ED279 data
-  let totalAllocation = 0
-  let localShare = 0
-  let stateShare = 0
-  let pupilCount = 0
-  let milRate = 0
-  let adjustedValuation = 0
-  
-  // Parse ED279 data
-  // Look for key patterns in the data
-  for (let i = 0; i < data.length; i++) {
-    const row = data[i]
-    if (!row) continue
-    
-    const rowText = row.map(c => String(c || '')).join(' ')
-    const rowLower = rowText.toLowerCase()
-    
-    // Extract district name (usually in header)
-    if (i < 5 && district === 'Unknown') {
-      for (const cell of row) {
-        const cellStr = String(cell || '').trim()
-        if (cellStr.length > 10 && !cellStr.match(/^(FY|ED279|Date|Page|Essential)/i)) {
-          // Check if it looks like a district name
-          if (cellStr.match(/(school|district|rsu|sad|csd|department|unit)/i)) {
-            district = cellStr
-            break
-          }
-        }
-      }
-    }
-    
-    // Extract fiscal year
-    const fyMatch = rowText.match(/FY\s*(\d{2,4})[-\/]?(\d{2,4})?/i) || 
-                    rowText.match(/(\d{4})[-\/](\d{2,4})/i)
-    if (fyMatch && fiscalYear === 'Unknown') {
-      if (fyMatch[2]) {
-        fiscalYear = `FY${fyMatch[1].slice(-2)}-${fyMatch[2].slice(-2)}`
-      } else {
-        fiscalYear = `FY${fyMatch[1]}`
-      }
-    }
-    
-    // Look for allocation amounts by category
-    // Regular Instruction / Basic Allocation
-    if (rowLower.includes('regular') && rowLower.includes('instruction') ||
-        rowLower.includes('basic') && rowLower.includes('allocation')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.regularInstruction = amount
-    }
-    
-    // Special Education
-    if (rowLower.includes('special') && rowLower.includes('education')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.specialEducation = amount
-    }
-    
-    // Career & Technical Education / CTE
-    if (rowLower.includes('career') || rowLower.includes('cte') || 
-        rowLower.includes('vocational') || rowLower.includes('technical education')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.careerTechnical = amount
-    }
-    
-    // Transportation
-    if (rowLower.includes('transport') && !rowLower.includes('total')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.transportation = amount
-    }
-    
-    // System Administration / Central Office
-    if ((rowLower.includes('system') && rowLower.includes('admin')) ||
-        rowLower.includes('central office') || rowLower.includes('superintendent')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.systemAdmin = amount
-    }
-    
-    // School Administration
-    if (rowLower.includes('school') && rowLower.includes('admin') && 
-        !rowLower.includes('system')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.schoolAdmin = amount
-    }
-    
-    // Facilities / Operations & Maintenance
-    if (rowLower.includes('facilities') || rowLower.includes('maintenance') ||
-        rowLower.includes('operations') || rowLower.includes('o&m')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.facilitiesMaint = amount
-    }
-    
-    // Student & Staff Support / Guidance / Support Services
-    if ((rowLower.includes('student') && rowLower.includes('support')) ||
-        rowLower.includes('guidance') || rowLower.includes('staff support') ||
-        rowLower.includes('support services')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.studentStaffSupport = amount
-    }
-    
-    // Debt Service
-    if (rowLower.includes('debt') && rowLower.includes('service')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) allocations.debtService = amount
-    }
-    
-    // Total Allocation / Operating Allocation
-    if ((rowLower.includes('total') && rowLower.includes('allocation')) ||
-        rowLower.includes('operating allocation') ||
-        rowLower.includes('total eps')) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) totalAllocation = amount
-    }
-    
-    // Local Share / Required Local Contribution
-    if (rowLower.includes('local') && (rowLower.includes('share') || rowLower.includes('contribution'))) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) localShare = amount
-    }
-    
-    // State Share / State Subsidy
-    if (rowLower.includes('state') && (rowLower.includes('share') || rowLower.includes('subsidy'))) {
-      const amount = findAmountInRow(row)
-      if (amount > 0) stateShare = amount
-    }
-    
-    // Pupil Count
-    if (rowLower.includes('pupil') && (rowLower.includes('count') || rowLower.includes('enrollment'))) {
-      const num = findNumberInRow(row)
-      if (num > 0 && num < 50000) pupilCount = num
-    }
-    
-    // Mil Rate
-    if (rowLower.includes('mil') && rowLower.includes('rate')) {
-      const num = findNumberInRow(row)
-      if (num > 0 && num < 100) milRate = num
-    }
-    
-    // State Valuation
-    if (rowLower.includes('valuation') || rowLower.includes('assessed')) {
-      const amount = findAmountInRow(row)
-      if (amount > 1000000) adjustedValuation = amount
-    }
-  }
-  
-  // Calculate total if not found
-  if (totalAllocation === 0) {
-    totalAllocation = Object.values(allocations).reduce((sum, val) => sum + val, 0)
-  }
-  
-  // Build summary rows from allocations
-  const summary = Object.entries(allocations)
-    .filter(([_, amount]) => amount > 0)
-    .map(([key, amount]) => ({
-      category: EPS_CATEGORIES[key] || key,
-      epsAllocation: amount,
-      percentOfTotal: totalAllocation > 0 ? (amount / totalAllocation) * 100 : 0,
-    }))
-    .sort((a, b) => b.epsAllocation - a.epsAllocation)
-
-  return {
-    success: true,
-    data: {
-      reportType: 'ED279 - EPS Allocation',
-      district,
-      fiscalYear,
-      generatedDate,
-      ed279: {
-        allocations,
-        totalAllocation,
-        localShare,
-        stateShare,
-        pupilCount,
-        milRate,
-        adjustedValuation,
-        perPupilAllocation: pupilCount > 0 ? totalAllocation / pupilCount : 0,
-      },
-      summary,
-      details: [],
-      totals: {
-        budget: totalAllocation,
-        actual: 0,
-        encumbered: 0,
-        available: totalAllocation,
-      },
-    },
-  }
+  return text.includes('fte') || text.includes('staffing') || text.includes('position')
 }
 
 function parseTrioReport(workbook: XLSX.WorkBook) {
@@ -386,46 +243,26 @@ function parseTrioReport(workbook: XLSX.WorkBook) {
 
   const sheetNames = workbook.SheetNames
 
-  // Try Comparative Financial Statement format first
   if (sheetNames.includes('Summary') && sheetNames.includes('Detail')) {
-    // Parse Summary sheet for metadata
     const summarySheet = workbook.Sheets['Summary']
     const summaryData = XLSX.utils.sheet_to_json<string[]>(summarySheet, { header: 1 })
     
     reportType = 'Comparative Financial Statement'
-    
-    // Extract district name from first cell
-    if (summaryData[0] && summaryData[0][0]) {
-      district = String(summaryData[0][0]).trim()
-    }
+    if (summaryData[0] && summaryData[0][0]) district = String(summaryData[0][0]).trim()
 
-    // Extract metadata from the description row
     for (const row of summaryData) {
       const rowStr = row.join(' ')
-      
       const fyMatch = rowStr.match(/FY(\d{2})-(\d{2})/i)
-      if (fyMatch) {
-        fiscalYear = `FY${fyMatch[1]}-${fyMatch[2]}`
-      }
-      
+      if (fyMatch) fiscalYear = `FY${fyMatch[1]}-${fyMatch[2]}`
       const dateMatch = rowStr.match(/Created On:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)
-      if (dateMatch) {
-        generatedDate = dateMatch[1]
-      }
+      if (dateMatch) generatedDate = dateMatch[1]
     }
 
-    // Parse Summary rows
     let foundHeader = false
     for (const row of summaryData) {
       if (!row || row.length < 5) continue
-      
       const firstCell = String(row[0] || '').trim()
-      
-      if (firstCell === 'Budget Category') {
-        foundHeader = true
-        continue
-      }
-      
+      if (firstCell === 'Budget Category') { foundHeader = true; continue }
       if (!foundHeader) continue
       
       const categoryMatch = firstCell.match(/^(\d{2})\s+(.+)/)
@@ -434,156 +271,61 @@ function parseTrioReport(workbook: XLSX.WorkBook) {
         const actual = parseNumber(row[2])
         const encumbered = parseNumber(row[3])
         const available = parseNumber(row[4])
-        
-        if (budget < 0) continue // Skip revenue rows
-        
-        summary.push({
-          category: firstCell,
-          budget,
-          actual,
-          encumbered,
-          available,
-          percentSpent: budget > 0 ? (actual / budget) * 100 : 0,
-        })
+        if (budget < 0) continue
+        summary.push({ category: firstCell, budget, actual, encumbered, available, percentSpent: budget > 0 ? (actual / budget) * 100 : 0 })
       }
     }
 
-    // Parse Detail sheet
     const detailSheet = workbook.Sheets['Detail']
     const detailData = XLSX.utils.sheet_to_json<string[]>(detailSheet, { header: 1 })
 
     let headerRowIndex = -1
     for (let i = 0; i < detailData.length; i++) {
-      const row = detailData[i]
-      if (row && row.some(cell => String(cell).includes('Account Code'))) {
-        headerRowIndex = i
-        break
-      }
+      if (detailData[i]?.some(cell => String(cell).includes('Account Code'))) { headerRowIndex = i; break }
     }
 
     if (headerRowIndex >= 0) {
       for (let i = headerRowIndex + 1; i < detailData.length; i++) {
         const row = detailData[i]
         if (!row || row.length < 6) continue
-
         const accountCode = String(row[0] || '').trim()
-        
         if (!accountCode.match(/^\d{4}-\d{4}-\d{4}-\d{4}-\d{3}$/)) continue
 
         const parts = accountCode.split('-')
-        const budget = parseNumber(row[2])
-        const actual = parseNumber(row[3])
-        const encumbered = parseNumber(row[4])
-        const available = parseNumber(row[5])
-
         details.push({
           accountCode,
           description: String(row[1] || '').trim(),
-          fund: parts[0],
-          program: parts[1],
-          function: parts[2],
-          object: parts[3],
-          location: parts[4],
-          budget,
-          actual,
-          encumbered,
-          available,
-          percentSpent: budget > 0 ? (actual / budget) * 100 : 0,
+          fund: parts[0], program: parts[1], function: parts[2], object: parts[3], location: parts[4],
+          budget: parseNumber(row[2]),
+          actual: parseNumber(row[3]),
+          encumbered: parseNumber(row[4]),
+          available: parseNumber(row[5]),
+          percentSpent: parseNumber(row[2]) > 0 ? (parseNumber(row[3]) / parseNumber(row[2])) * 100 : 0,
           epsCategory: FUNCTION_TO_EPS[parts[2]] || 'allOther',
         })
       }
     }
-  } else {
-    // Try generic format
-    const sheet = workbook.Sheets[sheetNames[0]]
-    const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
-
-    for (let i = 0; i < Math.min(10, data.length); i++) {
-      const row = data[i]
-      if (!row) continue
-      
-      const rowStr = row.join(' ')
-      
-      if (district === 'Unknown' && row[0] && String(row[0]).length > 3) {
-        const firstCell = String(row[0]).trim()
-        if (!firstCell.match(/^(FY|Cycle|Account|Budget)/i)) {
-          district = firstCell
-        }
-      }
-      
-      const fyMatch = rowStr.match(/FY\s*(\d{2})-(\d{2})/i)
-      if (fyMatch && fiscalYear === 'Unknown') {
-        fiscalYear = `FY${fyMatch[1]}-${fyMatch[2]}`
-      }
-    }
-
-    for (const row of data) {
-      if (!row || row.length < 3) continue
-      
-      const firstCell = String(row[0] || '').trim()
-      
-      if (firstCell.match(/^\d{4}-\d{4}-\d{4}-\d{4}-\d{3}$/)) {
-        const parts = firstCell.split('-')
-        const numbers = row.slice(1).map(parseNumber).filter(n => !isNaN(n))
-        
-        if (numbers.length >= 2) {
-          const budget = numbers[0] || 0
-          const actual = numbers[1] || 0
-          const encumbered = numbers[2] || 0
-          const available = numbers[3] || (budget - actual - encumbered)
-
-          details.push({
-            accountCode: firstCell,
-            description: String(row[1] || '').trim(),
-            fund: parts[0],
-            program: parts[1],
-            function: parts[2],
-            object: parts[3],
-            location: parts[4],
-            budget,
-            actual,
-            encumbered,
-            available,
-            percentSpent: budget > 0 ? (actual / budget) * 100 : 0,
-            epsCategory: FUNCTION_TO_EPS[parts[2]] || 'allOther',
-          })
-        }
-      }
-    }
   }
 
-  // Generate summary from details if not available
   if (summary.length === 0 && details.length > 0) {
     const byFunction: Record<string, { budget: number, actual: number, encumbered: number }> = {}
-    
     for (const row of details.filter(d => d.budget > 0)) {
-      const func = row.function
-      if (!byFunction[func]) {
-        byFunction[func] = { budget: 0, actual: 0, encumbered: 0 }
-      }
-      byFunction[func].budget += row.budget
-      byFunction[func].actual += row.actual
-      byFunction[func].encumbered += row.encumbered
+      if (!byFunction[row.function]) byFunction[row.function] = { budget: 0, actual: 0, encumbered: 0 }
+      byFunction[row.function].budget += row.budget
+      byFunction[row.function].actual += row.actual
+      byFunction[row.function].encumbered += row.encumbered
     }
-
     for (const [func, totals] of Object.entries(byFunction)) {
-      const available = totals.budget - totals.actual - totals.encumbered
-      const functionName = FUNCTION_CODES[func] || `Function ${func}`
-      
       summary.push({
-        category: `${func} - ${functionName}`,
-        budget: totals.budget,
-        actual: totals.actual,
-        encumbered: totals.encumbered,
-        available,
+        category: `${func} - ${FUNCTION_CODES[func] || 'Function ' + func}`,
+        budget: totals.budget, actual: totals.actual, encumbered: totals.encumbered,
+        available: totals.budget - totals.actual - totals.encumbered,
         percentSpent: totals.budget > 0 ? (totals.actual / totals.budget) * 100 : 0,
       })
     }
-    
     summary.sort((a, b) => b.budget - a.budget)
   }
 
-  // Calculate totals
   const expenditureDetails = details.filter(d => d.budget > 0)
   const totals = {
     budget: expenditureDetails.reduce((sum, d) => sum + d.budget, 0),
@@ -592,150 +334,53 @@ function parseTrioReport(workbook: XLSX.WorkBook) {
     available: expenditureDetails.reduce((sum, d) => sum + d.available, 0),
   }
 
-  // Generate EPS category mapping from details
   const epsSummary: Record<string, { budget: number, actual: number }> = {}
   for (const row of expenditureDetails) {
-    const category = row.epsCategory || 'allOther'
-    if (!epsSummary[category]) {
-      epsSummary[category] = { budget: 0, actual: 0 }
-    }
-    epsSummary[category].budget += row.budget
-    epsSummary[category].actual += row.actual
+    const cat = row.epsCategory || 'allOther'
+    if (!epsSummary[cat]) epsSummary[cat] = { budget: 0, actual: 0 }
+    epsSummary[cat].budget += row.budget
+    epsSummary[cat].actual += row.actual
   }
 
-  return {
-    success: true,
-    data: {
-      reportType,
-      district,
-      fiscalYear,
-      generatedDate,
-      summary,
-      details,
-      totals,
-      epsSummary,
-    },
-  }
+  return { success: true, data: { reportType, district, fiscalYear, generatedDate, summary, details, totals, epsSummary } }
 }
 
 function parseStaffingReport(workbook: XLSX.WorkBook) {
   const sheet = workbook.Sheets[workbook.SheetNames[0]]
   const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 })
   
-  let district = 'Unknown'
-  let fiscalYear = 'Unknown'
-  
+  let district = 'Unknown', fiscalYear = 'Unknown'
   const staffing: any[] = []
-  
-  // Find header row
-  let headerRow = -1
-  let headers: string[] = []
+  let headerRow = -1, headers: string[] = []
   
   for (let i = 0; i < data.length; i++) {
     const row = data[i]
     if (!row) continue
-    
     const rowText = row.map(c => String(c || '').toLowerCase()).join(' ')
-    
-    if (rowText.includes('position') || rowText.includes('fte') || rowText.includes('employee')) {
-      headerRow = i
-      headers = row.map(c => String(c || '').trim())
-      break
-    }
-    
-    // Extract district/year from early rows
-    if (i < 5) {
-      const firstCell = String(row[0] || '').trim()
-      if (firstCell.length > 10 && district === 'Unknown') {
-        if (firstCell.match(/(school|district|rsu|sad|csd)/i)) {
-          district = firstCell
-        }
-      }
-      
-      const rowStr = row.join(' ')
-      const fyMatch = rowStr.match(/FY\s*(\d{2})-(\d{2})/i)
-      if (fyMatch && fiscalYear === 'Unknown') {
-        fiscalYear = `FY${fyMatch[1]}-${fyMatch[2]}`
-      }
-    }
+    if (rowText.includes('position') || rowText.includes('fte')) { headerRow = i; headers = row.map(c => String(c || '').trim()); break }
   }
   
-  // Parse staffing rows
   if (headerRow >= 0) {
     for (let i = headerRow + 1; i < data.length; i++) {
       const row = data[i]
       if (!row || row.length < 2) continue
-      
       const record: any = {}
-      for (let j = 0; j < headers.length; j++) {
-        record[headers[j]] = row[j]
-      }
-      
-      if (Object.values(record).some(v => v !== undefined && v !== '')) {
-        staffing.push(record)
-      }
+      for (let j = 0; j < headers.length; j++) record[headers[j]] = row[j]
+      if (Object.values(record).some(v => v !== undefined && v !== '')) staffing.push(record)
     }
   }
   
-  // Calculate FTE totals
   let totalFTE = 0
   for (const record of staffing) {
     const fteKey = Object.keys(record).find(k => k.toLowerCase().includes('fte'))
-    if (fteKey) {
-      const fte = parseNumber(record[fteKey])
-      if (!isNaN(fte)) totalFTE += fte
-    }
+    if (fteKey) totalFTE += parseNumber(record[fteKey])
   }
 
-  return {
-    success: true,
-    data: {
-      reportType: 'Staffing Report',
-      district,
-      fiscalYear,
-      generatedDate: new Date().toLocaleDateString(),
-      staffing,
-      totalFTE,
-      positionCount: staffing.length,
-      summary: [],
-      details: [],
-      totals: { budget: 0, actual: 0, encumbered: 0, available: 0 },
-    },
-  }
-}
-
-function findAmountInRow(row: any[]): number {
-  for (let i = row.length - 1; i >= 0; i--) {
-    const val = row[i]
-    if (val === null || val === undefined) continue
-    
-    const num = parseNumber(val)
-    if (num > 1000) { // Assume budget amounts are > $1000
-      return num
-    }
-  }
-  return 0
-}
-
-function findNumberInRow(row: any[]): number {
-  for (let i = row.length - 1; i >= 0; i--) {
-    const val = row[i]
-    if (val === null || val === undefined) continue
-    
-    const num = parseNumber(val)
-    if (num > 0) {
-      return num
-    }
-  }
-  return 0
+  return { success: true, data: { reportType: 'Staffing Report', district, fiscalYear, generatedDate: new Date().toLocaleDateString(), staffing, totalFTE, positionCount: staffing.length, summary: [], details: [], totals: { budget: 0, actual: 0, encumbered: 0, available: 0 } } }
 }
 
 function parseNumber(value: unknown): number {
   if (typeof value === 'number') return value
-  if (typeof value === 'string') {
-    const cleaned = value.replace(/[$,]/g, '').trim()
-    const num = parseFloat(cleaned)
-    return isNaN(num) ? 0 : num
-  }
+  if (typeof value === 'string') return parseFloat(value.replace(/[$,]/g, '').trim()) || 0
   return 0
 }
